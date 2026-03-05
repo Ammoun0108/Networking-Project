@@ -4,11 +4,11 @@
 # - Fragmented JPEG frame streaming
 # - Adaptive 1080p / 480p based on RTT-derived throughput from ACKs
 # - Optional client FEEDBACK (buffer_level, accept_rate) to refine decisions
-# - Loops video 5 times, then sends END_OF_STREAM and closes
+# - Loops video NUM_LOOPS times, then sends END_OF_STREAM and closes
 #
 # Directories expected:
-#   library/1080p/frame_XXXX.jpg
-#   library/480p/frame_XXXX.jpg
+#   Library/1080p/frame_XXXX.jpg
+#   Library/480p/frame_XXXX.jpg
 
 import socket
 import time
@@ -35,10 +35,14 @@ DIR_480 = LIB_ROOT / "480p"
 alpha_throughput = 0.1
 smoothed_throughput = None  # EMA of bytes/sec
 
-# Throughput hysteresis thresholds (bytes/sec) – tune these
-DOWN_SWITCH_THRESHOLD = 10e6   # 0.1 MB/s  ≈ 0.8 Mbps
-UP_SWITCH_THRESHOLD   = 5e6  # 0.15 MB/s ≈ 1.2 Mbps
-
+# ===== FIXED hysteresis thresholds (bytes/sec) =====
+# Use proper hysteresis ordering:
+# - switch DOWN to 480p when throughput falls below DOWN_SWITCH_THRESHOLD (low)
+# - switch UP to 1080p when throughput rises above UP_SWITCH_THRESHOLD (high)
+#
+# (Tune these for your network + encoder settings.)
+DOWN_SWITCH_THRESHOLD = 5e6   # 5 MB/s  ≈ 40 Mbps
+UP_SWITCH_THRESHOLD   = 10e6  # 10 MB/s ≈ 80 Mbps
 
 # Map frame_id -> frame size (bytes)
 frame_sizes = {}
@@ -118,10 +122,8 @@ def drain_control_packets(sock: socket.socket, client_addr, feedback_state: dict
         try:
             data, addr = sock.recvfrom(65535)
         except BlockingIOError:
-            # No more data available
             break
         except socket.error:
-            # Some other socket issue; treat as no more data
             break
 
         # Ignore packets from other addresses
@@ -170,6 +172,10 @@ def choose_resolution(smoothed_tp,
         # At the beginning, be optimistic and start high-res
         is_high = True
     else:
+        # Proper hysteresis:
+        # - if below DOWN threshold -> go low
+        # - if above UP threshold   -> go high
+        # - otherwise hold last
         if smoothed_tp < DOWN_SWITCH_THRESHOLD:
             last_is_high = False
         elif smoothed_tp > UP_SWITCH_THRESHOLD:
@@ -260,7 +266,6 @@ def main():
             continue
 
         if hdr.packet_type != PacketType.CONTROL:
-            # Expect CONTROL packet for handshake
             continue
 
         try:
